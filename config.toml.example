@@ -239,7 +239,13 @@ n_trees = 10
 metric = "angular"
 
 [feeds]
-# Default lookback period (in days) for RSS ingestion
+# Default lookback period (in days) for RSS ingestion.
+#
+# The window for each feed is also carried forward from its last complete read:
+# after a failed fetch, a 304, or a temporarily empty feed, the next ingest
+# resumes from the last fully-read point instead of from "now", so anything
+# published in between is still picked up. A larger lookback always widens the
+# window; it never narrows it.
 default_lookback = 7
 
 # Maximum articles to process per feed during ingestion

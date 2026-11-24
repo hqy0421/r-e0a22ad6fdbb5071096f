@@ -361,26 +361,35 @@ def list_subscriptions(ctx, sort, width):
     terminal_width = shutil.get_terminal_size().columns
     
     # Calculate column widths based on terminal width
-    domain_width = min(30, max(15, int(terminal_width * 0.2)))
-    status_width = 10
+    domain_width = min(26, max(15, int(terminal_width * 0.15)))
+    status_width = 14
     articles_width = 8
     date_width = 12
-    feed_width = min(width, terminal_width - domain_width - status_width - articles_width - date_width - 10)  # 10 for padding and borders
-    
+    error_width = 24
+    fixed = status_width + 10 + articles_width + date_width * 2 + 8 + error_width + 10
+    feed_width = max(20, min(width, terminal_width - domain_width - fixed))
+
     # Add columns with appropriate width constraints
     table.add_column("Feed", width=feed_width, no_wrap=False)
-    table.add_column("Status", width=status_width)
+    table.add_column("Status", width=status_width, no_wrap=True)
     table.add_column("Articles", justify="right", width=articles_width)
     table.add_column("Rating", justify="center", width=10)
     table.add_column("Last Updated", width=date_width)
+    table.add_column("Last Read", width=date_width, no_wrap=True)
     table.add_column("Domain", style="dim", width=domain_width, no_wrap=True)
     table.add_column("Errors", justify="right", width=8)
-    table.add_column("Last Error", style="dim", width=30, no_wrap=True)
-    
+    table.add_column("Last Error", style="dim", width=error_width, no_wrap=True)
+
     for feed in feeds:
         # Use stored article count instead of querying each time
         article_count = feed.article_count or 0
         last_updated = feed.last_updated.strftime("%Y-%m-%d") if feed.last_updated else "Never"
+
+        # Last complete read: the point the next fetch window resumes from.
+        # 304 / deferred / failure rounds do not move data, so this date is when
+        # the source was last read end to end.
+        last_read = (feed.last_complete_read_at.strftime("%Y-%m-%d")
+                     if feed.last_complete_read_at else "Never")
         
         # Create status column with muted and peer-through indicators
         status_parts = []
@@ -388,6 +397,11 @@ def list_subscriptions(ctx, sort, width):
             status_parts.append("[dim italic]MUTED[/dim italic]")
         if feed.peer_through:
             status_parts.append("[green]PT[/green]")
+        # Fetch state: how the last attempt against the source ended.
+        if feed.last_fetch_status == "capped":
+            status_parts.append("[yellow]DEFER[/yellow]")
+        elif feed.last_fetch_status in ("error", "empty"):
+            status_parts.append(f"[red]{feed.last_fetch_status.upper()}[/red]")
         status = " ".join(status_parts) if status_parts else ""
         
         # Prepare rating display
@@ -464,6 +478,7 @@ def list_subscriptions(ctx, sort, width):
             str(article_count),
             rating_display,
             last_updated,
+            last_read,
             domain,
             f"{error_style}{error_count}[/red]" if error_count else "",
             last_error
@@ -597,6 +612,12 @@ def ingest(ctx, lookback, debug):
         # Step 1: Fetch articles from feeds
         result = processor.ingest_feeds(lookback_days=lookback, debug=debug)
         click.echo(f"Processed {result['feeds_processed']} feeds, found {result['new_articles']} new articles.")
+        if result.get('not_modified'):
+            click.echo(f"  Unchanged since last complete read (304): {result['not_modified']}")
+        if result.get('deferred'):
+            click.echo(f"  Deferred by per-round cap, will resume next ingest: {result['deferred']}")
+        if result.get('errors'):
+            click.echo(f"  Feeds that failed this round (previous window retained): {result['errors']}")
         
         # Display information about auto-muted feeds if any
         if 'auto_muted' in result and result['auto_muted'] > 0:

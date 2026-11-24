@@ -13,6 +13,11 @@ RSSidian is a powerful tool that bridges your RSS feed subscriptions with Obsidi
   - Retrieves and parses RSS feeds to discover new articles
   - Defaults to processing only recent articles (last 7 days)
   - Configurable lookback period for older content
+  - HTTP conditional requests (ETag / Last-Modified) per feed, so unchanged
+    feeds cost a 304 instead of a full download
+  - Each feed tracks the window covered by its last *complete* read: a 304 keeps
+    existing data and does not clear it, and a failed fetch keeps the previous
+    window so the next ingest catches up on anything published meanwhile
 - **Smart Storage**:
   - SQLite3 database for article metadata and full content
   - Annoy vector index for fast semantic search

@@ -7,6 +7,49 @@ from sqlalchemy.orm import relationship, sessionmaker, Session
 
 Base = declarative_base()
 
+# Columns added after the initial schema. Existing databases are upgraded in
+# place; SQLite's ALTER TABLE ADD COLUMN is enough for these nullable columns.
+_SCHEMA_MIGRATIONS = {
+    "articles": {
+        "embedding_vector": "TEXT",
+    },
+    "feeds": {
+        # HTTP conditional-request validators for the cached feed document.
+        "http_etag": "TEXT",
+        "http_last_modified": "TEXT",
+        # The time window actually covered by the most recent complete read.
+        # These are updated together with the validators above, and only when
+        # a read completed successfully (HTTP 200 with a parseable document, or
+        # a 304 confirming the cached document is still current).
+        "last_complete_read_at": "DATETIME",
+        "last_window_start": "DATETIME",
+        # Human-readable outcome of the most recent fetch attempt.
+        "last_fetch_status": "VARCHAR(32)",
+        # Set when a read returned entries the per-round cap left unhandled.
+        # While set, the stored validators do not describe the current
+        # document, so the next round must read it unconditionally.
+        "pending_backlog": "BOOLEAN DEFAULT 0",
+    },
+}
+
+
+def _migrate_schema(engine) -> None:
+    """Add columns that are missing from pre-existing databases."""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+
+    with engine.connect() as conn:
+        for table, columns in _SCHEMA_MIGRATIONS.items():
+            if table not in table_names:
+                continue
+            existing = {col["name"] for col in inspector.get_columns(table)}
+            for column, sql_type in columns.items():
+                if column not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
+        conn.commit()
+
 
 class Feed(Base):
     """Model for RSS feed subscriptions."""
@@ -25,7 +68,16 @@ class Feed(Base):
     error_count = Column(Integer, default=0)  # Count of consecutive errors
     no_entries_count = Column(Integer, default=0)  # Count of consecutive checks with no entries
     last_error = Column(Text, nullable=True)
-    
+
+    # Per-source fetch state. The validators and the read window are one unit:
+    # they are only advanced together after a complete read of the document.
+    http_etag = Column(Text, nullable=True)  # ETag for If-None-Match
+    http_last_modified = Column(Text, nullable=True)  # Last-Modified for If-Modified-Since
+    last_complete_read_at = Column(DateTime, nullable=True)  # When the window was last confirmed
+    last_window_start = Column(DateTime, nullable=True)  # Start of the confirmed read window
+    last_fetch_status = Column(String(32), nullable=True)  # ok | not_modified | empty | error | capped
+    pending_backlog = Column(Boolean, default=False)  # entries deferred by the per-round cap
+
     # Statistics
     article_count = Column(Integer, default=0)  # Total count of ingested articles
     avg_quality_score = Column(Float, nullable=True)  # Average quality score of articles
@@ -74,15 +126,7 @@ def init_db(db_path: str) -> Session:
     """Initialize database and return session."""
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
-
-    # Migrate: add embedding_vector column if missing (existing databases)
-    from sqlalchemy import inspect, text
-    inspector = inspect(engine)
-    columns = [col["name"] for col in inspector.get_columns("articles")]
-    if "embedding_vector" not in columns:
-        with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE articles ADD COLUMN embedding_vector TEXT"))
-            conn.commit()
+    _migrate_schema(engine)
 
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     return SessionLocal()
@@ -91,15 +135,7 @@ def init_db(db_path: str) -> Session:
 def get_db_session(db_path: str) -> Session:
     """Get a database session."""
     engine = create_engine(f"sqlite:///{db_path}")
-
-    # Migrate: add embedding_vector column if missing (existing databases)
-    from sqlalchemy import inspect, text
-    inspector = inspect(engine)
-    columns = [col["name"] for col in inspector.get_columns("articles")]
-    if "embedding_vector" not in columns:
-        with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE articles ADD COLUMN embedding_vector TEXT"))
-            conn.commit()
+    _migrate_schema(engine)
 
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     return SessionLocal()
